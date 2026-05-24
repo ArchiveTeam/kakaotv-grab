@@ -68,7 +68,7 @@ if not WGET_AT:
 #
 # Update this each time you make a non-cosmetic change.
 # It will be added to the WARC files and reported to the tracker.
-VERSION = '20260520.04'
+VERSION = '20260524.01'
 TRACKER_ID = 'kakaotv'
 TRACKER_HOST = 'legacy-api.arpa.li'
 MULTI_ITEM_SIZE = 100
@@ -179,6 +179,14 @@ class SetBadUrls(SimpleTask):
                 items.pop(index)
                 items_lower.pop(index)
         item['item_name'] = '\0'.join(items)
+
+
+class MaybeUploadWithTracker(UploadWithTracker):
+    def enqueue(self, item):
+        if len(item['item_name']) == 0:
+            item.log_output('Skipping UploadWithTracker.')
+            return self.complete_item(item)
+        return super(UploadWithTracker, self).enqueue(item)
 
 
 class MaybeSendDoneToTracker(SendDoneToTracker):
@@ -342,7 +350,7 @@ pipeline = Pipeline(
     LimitConcurrent(NumberConfigValue(min=1, max=20, default='20',
         name='shared:rsync_threads', title='Rsync threads',
         description='The maximum number of concurrent uploads.'),
-        UploadWithTracker(
+        MaybeUploadWithTracker(
             'https://%s/%s' % (TRACKER_HOST, TRACKER_ID),
             downloader=downloader,
             version=VERSION,
