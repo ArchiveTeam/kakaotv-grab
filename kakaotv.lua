@@ -47,6 +47,37 @@ local item_patterns = {
   ["^https?://(thumb%.kakaocdn%.net/dna/kamp/source/.+)$"]="asset"
 }
 
+local skipped_channel_ids = {
+  ["1404"]=true,
+  ["1492"]=true,
+  ["1506"]=true,
+  ["1588"]=true,
+  ["1614"]=true,
+  ["2856"]=true,
+  ["4716"]=true,
+  ["1938380"]=true,
+  ["2370398"]=true,
+  ["2370406"]=true,
+  ["2370407"]=true,
+  ["2370408"]=true,
+  ["2370409"]=true,
+  ["2370416"]=true,
+  ["2370417"]=true,
+  ["2370425"]=true,
+  ["2370436"]=true,
+  ["2370437"]=true,
+  ["2372790"]=true,
+  ["2630399"]=true,
+  ["2735998"]=true,
+  ["2935620"]=true,
+  ["3358089"]=true,
+  ["4163724"]=true,
+  ["4177202"]=true,
+  ["5569846"]=true,
+  ["9124404"]=true,
+  ["9605079"]=true
+}
+
 abort_item = function(item)
   abortgrab = true
   if not item then
@@ -106,6 +137,7 @@ end
 found_video = function()
   if item_type == "video"
     and not abortgrab
+    and not context["skipped_channel"]
     and not context["video_queued"] then
     error("No main video stream URL queued.")
   end
@@ -435,13 +467,20 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
     check("https://play-tv.kakao.com/api/v3/ft/cliplinks/" .. item_value .. "/startAfter?service=und_player")
   end
 
-  local function scan_json_urls(data)
+  local function scan_json_urls(data, temp_only)
     if type(data) == "table" then
       for _, value in pairs(data) do
-        scan_json_urls(value)
+        scan_json_urls(value, temp_only)
       end
     elseif type(data) == "string" then
-      check(data)
+      if temp_only then
+        if string.match(data, "^https?://thumb%.kakaocdn%.net/dna/kamp/source/") then
+          ids[string.lower(data)] = true
+          check(data)
+        end
+      else
+        check(data)
+      end
     end
   end
 
@@ -652,6 +691,14 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
     elseif string.match(url, "/playmeta/cliplink/") then
       json = cjson.decode(html)
       local clip_link = json["clipLink"]
+      if skipped_channel_ids[tostring(clip_link["channel"]["user"]["id"])] then
+        io.stdout:write("Video belongs to a skipped channel.\n")
+        io.stdout:flush()
+        bad_items[item_name] = true
+        context["skipped_channel"] = true
+        scan_json_urls(json, true)
+        return urls
+      end
       if string.match(url, "/playmeta/cliplink/([^?]+)") == item_value then
         context["channel_id"] = clip_link["channelId"]
         check("https://tv.kakao.com/channel/" .. context["channel_id"] .. "/cliplink/" .. item_value)
