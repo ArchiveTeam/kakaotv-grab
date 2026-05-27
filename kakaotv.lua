@@ -421,6 +421,51 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
     check(urlparse.absolute(url, newurl))
   end
 
+  local function get_target_height()
+    if context["create_time"]
+      and context["create_time"] ~= cjson.null then
+      local create_date = string.match(context["create_time"], "^([0-9][0-9][0-9][0-9]%-[0-9][0-9]%-[0-9][0-9])")
+      if create_date then
+        if create_date < "2026-01-01" then
+          return 480
+        elseif create_date >= "2016-01-01" then
+          return 360
+        end
+      end
+    end
+  end
+
+  local function select_format(formats)
+    local selected = nil
+    local selected_distance = nil
+    local target_height = get_target_height()
+    for _, format in ipairs(formats) do
+      local distance = nil
+      if target_height then
+        distance = math.abs(format["height"] - target_height)
+      end
+      if not selected
+        or (
+          target_height
+          and (
+            distance < selected_distance
+            or (
+              distance == selected_distance
+              and format["pixels"] > selected["pixels"]
+            )
+          )
+        )
+        or (
+          not target_height
+          and format["pixels"] > selected["pixels"]
+        ) then
+        selected = format
+        selected_distance = distance
+      end
+    end
+    return selected
+  end
+
   local function ready_nplay_url(referer, cliplink_id, service, section, profile)
     referer = referer or "https://tv.kakao.com/v/" .. item_value
     cliplink_id = cliplink_id or item_value
@@ -678,12 +723,9 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
     elseif string.match(url, "^https?://tv%.kakao%.com/api/v1/ft/cliplinks/[0-9]+$") then
       json = cjson.decode(html)
       local clip = json["clip"]
-      if check_tistory_source(clip, json["channel"]) then
-        if context["channel_clip_404"] then
-          init_video_urls()
-        end
-      elseif context["channel_clip_404"] then
-        error("Video is likely a Daum video.")
+      if check_tistory_source(clip, json["channel"])
+        and context["channel_clip_404"] then
+        init_video_urls()
       end
       check_clip_thumbnails(clip)
       scan_json_urls(clip)
@@ -724,6 +766,7 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
         end
       end
       local clip = clip_link["clip"]
+      context["create_time"] = clip["createTime"]
       check_tistory_source(clip, clip_link["channel"])
       if clip["vid"]
         and clip["vid"] ~= cjson.null then
@@ -809,14 +852,46 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
         )
       end
       local selected_stream = nil
-      for _, stream in ipairs(json["streams"]) do
-        if stream["profile"] == "HIGH" then
-          if string.match(stream["url"], "/dash/")
-            and string.match(stream["url"], "%.mpd%?") then
-            selected_stream = stream
-            break
-          elseif not selected_stream then
-            selected_stream = stream
+      local target_height = get_target_height()
+      if target_height
+        and #json["streams"] > 1 then
+        local selected_distance = nil
+        local selected_dash = false
+        for _, stream in ipairs(json["streams"]) do
+          local name = stream["name"]
+          if name == cjson.null then
+            name = ""
+          end
+          local height = tonumber(string.match(name or "", "([0-9]+)p"))
+            or tonumber(string.match(stream["url"], "_([0-9]+)P"))
+          if height then
+            local distance = math.abs(height - target_height)
+            local dash = string.match(stream["url"], "/dash/")
+              and string.match(stream["url"], "%.mpd%?")
+            if not selected_stream
+              or distance < selected_distance
+              or (
+                distance == selected_distance
+                and dash
+                and not selected_dash
+              ) then
+              selected_stream = stream
+              selected_distance = distance
+              selected_dash = dash
+            end
+          end
+        end
+      end
+      if not selected_stream then
+        for _, stream in ipairs(json["streams"]) do
+          if stream["profile"] == "HIGH" then
+            if string.match(stream["url"], "/dash/")
+              and string.match(stream["url"], "%.mpd%?") then
+              selected_stream = stream
+              break
+            elseif not selected_stream then
+              selected_stream = stream
+            end
           end
         end
       end
@@ -857,6 +932,7 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
       end
     elseif string.match(url, "%.m3u8") then
       local function get_attr(text, attr)
+        attr = string.gsub(attr, "%-", "%%-")
         return string.match(text, attr .. '="([^"]*)"')
           or string.match(text, attr .. "=([^,]+)")
       end
@@ -888,6 +964,7 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
             table.insert(stream_variants, {
               ["attrs"]=pending_stream_attrs,
               ["uri"]=line,
+              ["height"]=tonumber(height),
               ["pixels"]=tonumber(width) * tonumber(height)
             })
             pending_stream_attrs = nil
@@ -895,13 +972,7 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
         end
       end
       if #stream_variants > 0 then
-        local selected_variant = nil
-        for _, variant in ipairs(stream_variants) do
-          if not selected_variant
-            or variant["pixels"] > selected_variant["pixels"] then
-            selected_variant = variant
-          end
-        end
+        local selected_variant = select_format(stream_variants)
         check_manifest_url(selected_variant["uri"])
         local audio_group = get_attr(selected_variant["attrs"], "AUDIO")
         local selected_audio = nil
@@ -965,13 +1036,15 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
           kind = "audio"
         end
         local pixels = 0
+        local height = 0
         if kind == "video" then
-          pixels = tonumber(get_attr(repr_attrs, "width") or get_attr(adapt_attrs, "width"))
-            * tonumber(get_attr(repr_attrs, "height") or get_attr(adapt_attrs, "height"))
+          height = tonumber(get_attr(repr_attrs, "height") or get_attr(adapt_attrs, "height"))
+          pixels = tonumber(get_attr(repr_attrs, "width") or get_attr(adapt_attrs, "width")) * height
         end
         local representation = {
           ["id"]=repr_id,
           ["kind"]=kind,
+          ["height"]=height,
           ["pixels"]=pixels,
           ["templates"]={}
         }
@@ -996,17 +1069,15 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
         end
       end
       local selected_representations = {}
-      local selected_video = nil
+      local video_representations = {}
       for _, representation in ipairs(representations) do
         if representation["kind"] == "audio" then
           selected_representations[representation] = true
         else
-          if not selected_video
-            or representation["pixels"] > selected_video["pixels"] then
-            selected_video = representation
-          end
+          table.insert(video_representations, representation)
         end
       end
+      local selected_video = select_format(video_representations)
       if selected_video then
         selected_representations[selected_video] = true
       end
@@ -1104,8 +1175,47 @@ wget.callbacks.write_to_warc = function(url, http_stat)
     retry_url = true
     return false
   end
-  if status_code == 403
+  if status_code == 200
     and item_type == "video"
+    and string.match(url["url"], "^https?://video%.daum%.net/shorts/view/" .. item_value .. "$") then
+    io.stdout:write("Video redirects to Daum Shorts.\n")
+    io.stdout:flush()
+    abort_item()
+    return false
+  end
+  if status_code == 200
+    and item_type == "video"
+    and context["channel_clip_404"]
+    and string.match(url["url"], "^https?://tv%.kakao%.com/api/v1/ft/cliplinks/" .. item_value .. "$") then
+    local json = cjson.decode(read_file(http_stat["local_file"]))
+    local clip = json["clip"]
+    local tistory_source = false
+    for _, text in pairs({
+      clip["sourceUrl"],
+      clip["description"],
+      clip["service"] and clip["service"] ~= cjson.null and clip["service"]["name"],
+      json["channel"]["description"]
+    }) do
+      if text
+        and text ~= cjson.null
+        and string.match(string.lower(text), "tistory") then
+        tistory_source = true
+      end
+    end
+    if not tistory_source then
+      abort_item()
+      return false
+    end
+    if not (
+      clip["sourceUrl"]
+      and clip["sourceUrl"] ~= cjson.null
+      and string.match(clip["sourceUrl"], "^https?://([^/?#]+)")
+    ) then
+      abort_item()
+      return false
+    end
+  end
+  if status_code == 403
     and string.match(url["url"], "/readyNplay%?") then
     local json = cjson.decode(read_file(http_stat["local_file"]))
     if json["code"] == "GeoBlocked" then
@@ -1114,13 +1224,11 @@ wget.callbacks.write_to_warc = function(url, http_stat)
     end
   end
   if status_code ~= 200
-    and item_type == "playlist"
     and string.match(url["url"], "^https?://tv%.kakao%.com/api/v1/ft/playlists/" .. item_value .. "$") then
     abort_item()
     return false
   end
   if status_code ~= 200
-    and item_type == "channel"
     and string.match(url["url"], "^https?://tv%.kakao%.com/channel/" .. item_value .. "/info$") then
     abort_item()
     return false
